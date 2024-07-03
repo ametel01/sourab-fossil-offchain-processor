@@ -233,13 +233,12 @@ async fn verify_account_proof(
     eth_proof: &Proof,
 ) -> Result<(), StatusCode> {
     tracing::info!("Verifying account proof");
-    if !fact_registry_contract
+    if fact_registry_contract
         .get_verified_account_hash(
             input.block_number,
             U256::from_str(&input.account_address).unwrap(),
         )
-        .await
-        .is_ok()
+        .await.is_err()
     {
         tracing::info!("Account is not verified yet, verifying on Starknet");
         match fact_registry_contract
