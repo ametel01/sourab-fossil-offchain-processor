@@ -238,7 +238,8 @@ async fn verify_account_proof(
             input.block_number,
             U256::from_str(&input.account_address).unwrap(),
         )
-        .await.is_err()
+        .await
+        .is_err()
     {
         tracing::info!("Account is not verified yet, verifying on Starknet");
         match fact_registry_contract
