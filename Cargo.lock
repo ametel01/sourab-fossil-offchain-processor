@@ -1035,6 +1035,7 @@ dependencies = [
  "auto_impl",
  "ethers-contract",
  "ethers-core",
+ "ethers-etherscan",
  "ethers-providers",
  "ethers-signers",
  "futures-channel",
@@ -2515,6 +2516,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dotenv",
+ "ethers",
  "hex",
  "num-bigint",
  "primitive-types",
@@ -2522,6 +2524,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with 3.8.1",
+ "starknet",
  "thiserror",
  "tracing",
 ]
@@ -2686,6 +2689,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dotenv",
+ "ethers",
  "hex",
  "primitive-types",
  "proof-generator",

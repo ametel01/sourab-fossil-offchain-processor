@@ -7,15 +7,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 mod handlers;
 mod state;
+use dotenv::dotenv;
+use std::env;
 
 use crate::{handlers::get_storage_value::get_storage_value, state::AppState};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok(); // Load .env file
     setup_tracing();
+
+    let eth_rpc_url = env::var("ETH_RPC").expect("ETH_RPC must be set in .env file");
 
     let app_state = AppState {
         client: Client::new(),
+        eth_rpc_url,
     };
 
     let app = create_router(app_state);

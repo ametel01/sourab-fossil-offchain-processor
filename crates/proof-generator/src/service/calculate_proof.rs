@@ -4,7 +4,6 @@ use primitive_types::U256;
 use serde::Deserialize;
 use serde_json;
 
-use crate::model::account_proof::AccountProof;
 use crate::model::data::{Data, IntsSequence};
 use crate::model::errors::ProofError;
 use crate::model::hex::{u64_or_hex, HexString};
@@ -47,48 +46,43 @@ pub fn calculate_proof(
         .map(|element| -> IntsSequence { Data::from(HexString::new(element)).into() })
         .collect();
 
-    let (flat_account_proof, flat_account_proof_sized_bytes) =
-        flatten_proof(account_proof_ints_sequence);
+    let (flat_account_proof, _) = flatten_proof(account_proof_ints_sequence);
 
     let state_root: U256 = U256::from_str(&storage_keys[0])
         .map_err(|err| ProofError::FromHexError(err.to_string()))?;
 
     let len_proof = flat_account_proof.len();
 
-    let account_proof = AccountProof {
-        address: eth_trie_proofs.address,
-        balance: eth_trie_proofs.balance,
-        code_hash: eth_trie_proofs.code_hash,
-        storage_hash: eth_trie_proofs.storage_hash,
-        nonce: eth_trie_proofs.nonce,
-        bytes: flat_account_proof_sized_bytes,
-        data: flat_account_proof,
-    };
+    let account_proof = eth_trie_proofs.account_proof.clone();
 
-    let eth_storage_proof = eth_trie_proofs
+    let storage_proofs: Vec<StorageProof> = eth_trie_proofs
         .storage_proof
-        .first()
-        .ok_or(ProofError::StorageProofEmpty)?;
+        .into_iter()
+        .map(|eth_storage_proof| {
+            let storage_proof_ints_sequence: Vec<IntsSequence> = eth_storage_proof
+                .proof
+                .iter()
+                .map(|element| -> IntsSequence { Data::from(HexString::new(element)).into() })
+                .collect();
 
-    let storage_proof_ints_sequence: Vec<IntsSequence> = eth_storage_proof
-        .proof
-        .iter()
-        .map(|element| -> IntsSequence { Data::from(HexString::new(element)).into() })
+            let (_, _) = flatten_proof(storage_proof_ints_sequence);
+
+            StorageProof {
+                key: eth_storage_proof.key.to_string(),
+                value: eth_storage_proof.value.to_string(),
+                proof: eth_storage_proof.proof,
+            }
+        })
         .collect();
 
-    let (flat_storage_proof, flat_storage_proof_sized_bytes) =
-        flatten_proof(storage_proof_ints_sequence);
-
-    let storage_proof = StorageProof {
-        key: eth_storage_proof.key,
-        value: eth_storage_proof.value,
-        bytes: flat_storage_proof_sized_bytes,
-        data: flat_storage_proof,
-    };
-
     Ok(Proof {
+        address: eth_trie_proofs.address.to_string(),
+        balance: eth_trie_proofs.balance.to_string(),
+        code_hash: eth_trie_proofs.code_hash.to_string(),
+        nonce: eth_trie_proofs.nonce.to_string(),
+        storage_hash: eth_trie_proofs.storage_hash.to_string(),
         account_proof,
-        storage_proof,
+        storage_proof: storage_proofs,
         len_proof,
         state_root: state_root.to_string(),
     })

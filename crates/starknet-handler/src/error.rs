@@ -17,6 +17,16 @@ pub enum HandlerError {
     ParseError(#[from] FieldElementParseError),
     #[error("Non Ascii Name: {0}")]
     NonAsciiName(#[from] NonAsciiNameError),
+    #[error("Hex decode error: {0}")]
+    HexDecodeError(String),
+    #[error("Felt conversion error: {0}")]
+    FeltConversionError(String),
+    #[error("Error preparing array data: {0}")]
+    PrepareArrayDataError(String),
+    #[error("Error getting selector: {0}")]
+    SelectorError(String),
+    #[error("Error parsing field element: {0}")]
+    FieldElementParseError(String),
 }
 
 #[derive(Debug, Error)]

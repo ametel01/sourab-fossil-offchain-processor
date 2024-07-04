@@ -71,7 +71,7 @@ async fn main() {
 
     let block_number = 13843670;
 
-    let _ = contract
-        .prove_account(block_number, res.account_proof)
-        .await;
+    // let _ = contract
+    //     .prove_account(block_number, res.account_proof)
+    //     .await;
 }

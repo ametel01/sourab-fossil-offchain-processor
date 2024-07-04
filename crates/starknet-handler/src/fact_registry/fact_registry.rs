@@ -15,7 +15,7 @@ use starknet::{
 };
 
 use crate::{
-    error::{FieldElementParseError, HandlerError},
+    error::HandlerError,
     util::{get_high_and_low, prepare_array_data},
 };
 
@@ -50,9 +50,6 @@ impl FactRegistry {
     ) -> Result<InvokeTransactionResult, HandlerError> {
         let (slot_high, slot_low) = get_high_and_low(slot.clone());
 
-        let (bytes_len, mut bytes) = prepare_array_data(storage_proof.bytes)?;
-        let (data_len, mut data) = prepare_array_data(storage_proof.data)?;
-
         let entry_point_selector = get_selector_from_name("prove_storage")?;
 
         // Convert block_number to Felt directly
@@ -67,17 +64,37 @@ impl FactRegistry {
         let slot_low_felt = Felt::from_bytes_be_slice(&slot_low.to_be_bytes());
         let slot_high_felt = Felt::from_bytes_be_slice(&slot_high.to_be_bytes());
 
+        // Process the proof
+        let proof_data: Vec<Felt> = storage_proof
+            .proof
+            .iter()
+            .map(|proof_element| {
+                let bytes = hex::decode(proof_element.trim_start_matches("0x"))
+                    .map_err(|e| HandlerError::HexDecodeError(e.to_string()))?;
+                Ok(Felt::from_bytes_be_slice(&bytes))
+            })
+            .collect::<Result<Vec<Felt>, HandlerError>>()?;
+
+        let proof_len = Felt::from(proof_data.len());
+
         let mut calldata = vec![
             block_number_felt,
             account_address_felt,
             slot_low_felt,
             slot_high_felt,
+            proof_len,
         ];
 
-        calldata.push(bytes_len);
-        calldata.append(&mut bytes);
-        calldata.push(data_len);
-        calldata.append(&mut data);
+        calldata.extend(proof_data);
+
+        // Add key and value from StorageProof
+        let key_felt = Felt::from_hex(&storage_proof.key)
+            .map_err(|e| HandlerError::FeltConversionError(e.to_string()))?;
+        let value_felt = Felt::from_hex(&storage_proof.value)
+            .map_err(|e| HandlerError::FeltConversionError(e.to_string()))?;
+
+        calldata.push(key_felt);
+        calldata.push(value_felt);
 
         self.invoke(entry_point_selector, calldata).await
     }
@@ -87,24 +104,62 @@ impl FactRegistry {
         block_number: u64,
         account_proof: AccountProof,
     ) -> Result<InvokeTransactionResult, HandlerError> {
-        let (bytes_len, mut bytes) = prepare_array_data(account_proof.bytes)?;
-        let (data_len, mut data) = prepare_array_data(account_proof.data)?;
+        println!("Starting prove_account for block number: {}", block_number);
+
+        println!("Preparing bytes data");
+        println!("account_proof.bytes: {:?}", account_proof.bytes);
+        println!("Number of bytes: {}", account_proof.bytes.len());
+        let bytes_vec: Vec<String> = account_proof
+            .bytes
+            .into_iter()
+            .map(|b| b.to_string())
+            .collect();
+        println!("Bytes as strings: {:?}", bytes_vec);
+
+        // println!("Calling prepare_array_data for bytes");
+        // let (bytes_len, mut bytes) = prepare_array_data(bytes_vec)?;
+
+        println!("Preparing account proof data");
+        println!("account_proof.data: {:?}", account_proof.data);
+        println!("Number of data elements: {}", account_proof.data.len());
+
+        println!("Calling prepare_array_data for data");
+        let (mut bytes, mut proof) = prepare_array_data(account_proof.data)?;
 
         let entry_point_selector = get_selector_from_name("prove_account")?;
-        let mut calldata = vec![
-            Felt::from_dec_str(0.to_string().as_str())
-                .map_err(FieldElementParseError::FromStrError)?,
-            Felt::from_dec_str(account_proof.address.to_string().as_str())
-                .map_err(FieldElementParseError::FromStrError)?,
-            Felt::from_dec_str(block_number.to_string().as_str())
-                .map_err(FieldElementParseError::FromStrError)?,
-        ];
-        calldata.push(bytes_len);
-        calldata.append(&mut bytes);
-        calldata.push(data_len);
-        calldata.append(&mut data);
 
-        self.invoke(entry_point_selector, calldata).await
+        let mut calldata = Vec::new();
+
+        calldata.push(0.into());
+        calldata.push(Felt::from_hex(&account_proof.address).unwrap());
+        calldata.push(block_number.into());
+
+        calldata.push(bytes.len().into());
+        calldata.append(&mut bytes);
+        calldata.push(proof.len().into());
+        calldata.append(&mut proof);
+
+        println!("Calldata prepared, invoking contract");
+        println!("Calldata: {:?}", calldata);
+
+        let result = self.invoke(entry_point_selector, calldata).await;
+
+        match &result {
+            Ok(tx_result) => {
+                tracing::info!("Contract invocation successful");
+                tracing::debug!("Transaction result: {:?}", tx_result);
+            }
+            Err(e) => {
+                tracing::error!("Contract invocation failed: {:?}", e);
+            }
+        }
+        result
+        // // Mock result for debugging
+        // let mock_result = InvokeTransactionResult {
+        //     transaction_hash: felt!("0x123"),
+        // };
+        // println!("Mock result: {:?}", mock_result);
+        // Ok(mock_result)
     }
 
     pub async fn get_storage(
@@ -141,15 +196,15 @@ impl FactRegistry {
     pub async fn get_verified_account_hash(
         &self,
         block_number: u64,
-        account_address: U256,
+        account_address: Felt,
     ) -> Result<Vec<Felt>, HandlerError> {
-        let entry_point_selector = get_selector_from_name("get_verified_account_hash")?;
-        let calldata = vec![
-            Felt::from_dec_str(block_number.to_string().as_str())
-                .map_err(FieldElementParseError::FromStrError)?,
-            Felt::from_dec_str(account_address.to_string().as_str())
-                .map_err(FieldElementParseError::FromStrError)?,
-        ];
+        tracing::info!("Entering get_verified_account_hash");
+        let entry_point_selector = get_selector_from_name("get_verified_account_storage_hash")?;
+        let calldata = vec![account_address, block_number.into()];
+        tracing::info!(
+            "Calldata prepared for get_verified_account_storage_hash: {:?}",
+            calldata
+        );
 
         self.call(entry_point_selector, calldata).await
     }

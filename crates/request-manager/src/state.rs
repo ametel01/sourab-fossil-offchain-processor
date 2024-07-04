@@ -1,8 +1,5 @@
-use reqwest::Client;
-
 #[derive(Clone)]
 pub struct AppState {
-    pub client: Client,
-    // pub fact_registry: FactRegistry,
-    // pub l1_headers_store: L1HeadersStore,
+    pub client: reqwest::Client,
+    pub eth_rpc_url: String,
 }

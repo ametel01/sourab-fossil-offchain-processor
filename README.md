@@ -14,7 +14,7 @@ cargo run --release --bin request-manager
 curl --location 'http://localhost:8000/get-storage' \
 --header 'Content-Type: application/json' \
 --data '{
-	"account_address":"0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9",
+	"account_address":"0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
     "storage_keys": ["0x0"],
     "block_number": 4,
     "slot": "0x0"
