@@ -1,50 +1,51 @@
-use axum::{
-    extract::{FromRef, MatchedPath},
-    http::{Request, StatusCode},
-    routing::post,
-    Router,
-};
-use dotenv::dotenv;
-use proof_generator::controller::mev_blocker::call_mev_blocker_api;
+use axum::{extract::MatchedPath, http::Request, routing::post, Router};
 use reqwest::Client;
-use starknet::{
-    core::types::FieldElement,
-    signers::{LocalWallet, SigningKey},
-};
-use starknet_handler::{
-    fact_registry::fact_registry::FactRegistry, l1_headers_store::l1_headers_store::L1HeadersStore,
-};
-use std::str::FromStr;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::net::SocketAddr;
 use tower_http::trace::TraceLayer;
-use tracing::info_span;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::{info, info_span};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-pub mod handlers;
+mod handlers;
 mod state;
+use dotenv::dotenv;
+use std::env;
 
-use crate::state::AppState;
-use handlers::get_storage_value::get_storage_value;
+use crate::{handlers::get_storage_value::get_storage_value, state::AppState};
 
 #[tokio::main]
-async fn main() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "request_manager=info,tower_http=debug,axum=info,tokio=info".into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok(); // Load .env file
+    setup_tracing();
+
+    let eth_rpc_url = env::var("ETH_RPC").expect("ETH_RPC must be set in .env file");
 
     let app_state = AppState {
         client: Client::new(),
-        // fact_registry: fact_registry_contract, //
-        // l1_headers_store: l1_headers_store_contract,
+        eth_rpc_url,
     };
 
-    let app = Router::new()
+    let app = create_router(app_state);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("Listening on http://{}", listener.local_addr()?);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn setup_tracing() {
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            "request_manager=info,tower_http=debug,axum=info,tokio=info".into()
+        }))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
+
+fn create_router(app_state: AppState) -> Router {
+    Router::new()
         .route("/get-storage", post(get_storage_value))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
@@ -61,20 +62,5 @@ async fn main() {
                 )
             }),
         )
-        .with_state(app_state);
-
-    let listener = match tokio::net::TcpListener::bind("0.0.0.0:8000").await {
-        Ok(listener) => {
-            tracing::info!("Listening on http://{}", listener.local_addr().unwrap());
-            listener
-        }
-        Err(err) => {
-            tracing::error!("Failed to bind to address: {:?}", err);
-            return;
-        }
-    };
-
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("Server error: {}", e);
-    }
+        .with_state(app_state)
 }

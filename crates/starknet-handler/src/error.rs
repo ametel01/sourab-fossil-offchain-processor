@@ -2,12 +2,10 @@ use thiserror::Error;
 
 use starknet::{
     accounts::{single_owner::SignError, AccountError},
-    core::{
-        types::{FromByteSliceError, FromStrError},
-        utils::NonAsciiNameError,
-    },
+    core::{types::eth_address::FromBytesSliceError, utils::NonAsciiNameError},
     providers::ProviderError,
 };
+use starknet_types_core::felt::FromStrError;
 
 #[derive(Debug, Error)]
 pub enum HandlerError {
@@ -19,6 +17,16 @@ pub enum HandlerError {
     ParseError(#[from] FieldElementParseError),
     #[error("Non Ascii Name: {0}")]
     NonAsciiName(#[from] NonAsciiNameError),
+    #[error("Hex decode error: {0}")]
+    HexDecodeError(String),
+    #[error("Felt conversion error: {0}")]
+    FeltConversionError(String),
+    #[error("Error preparing array data: {0}")]
+    PrepareArrayDataError(String),
+    #[error("Error getting selector: {0}")]
+    SelectorError(String),
+    #[error("Error parsing field element: {0}")]
+    FieldElementParseError(String),
 }
 
 #[derive(Debug, Error)]
@@ -26,5 +34,5 @@ pub enum FieldElementParseError {
     #[error("FromStr error: {0}")]
     FromStrError(#[from] FromStrError),
     #[error("FromByteSlice error: {0}")]
-    FromByteSliceError(#[from] FromByteSliceError),
+    FromByteSliceError(#[from] FromBytesSliceError),
 }

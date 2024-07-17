@@ -1,13 +1,17 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::account_proof::AccountProof;
 use crate::model::storage_proof::StorageProof;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Proof {
-    pub account_proof: AccountProof,
-    pub storage_proof: StorageProof,
+    pub address: String,
+    pub balance: String,
+    pub code_hash: String,
+    pub nonce: String,
+    pub storage_hash: String,
+    pub account_proof: Vec<String>,
+    pub storage_proof: Vec<StorageProof>,
     pub len_proof: usize,
     pub state_root: String,
 }

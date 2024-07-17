@@ -1,5 +1,27 @@
 # Offchain Processor Components Requirements
 
+## Running the Offchain Processor
+```bash
+
+cargo run --release --bin request-manager
+
+```
+
+## Example API Request
+
+```bash
+
+curl --location 'http://localhost:8000/get-storage' \
+--header 'Content-Type: application/json' \
+--data '{
+	"account_address":"0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+    "storage_keys": ["0x0"],
+    "block_number": 4,
+    "slot": "0x0"
+}'
+
+```
+
 ### 1. Ethereum Data Dispatcher
 
 **Goal:**

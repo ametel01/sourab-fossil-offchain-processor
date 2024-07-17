@@ -1,252 +1,421 @@
-use axum::{
-    extract::State,
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{extract::State, response::IntoResponse, Json};
 use dotenv::dotenv;
 use reqwest::StatusCode;
 use serde::Deserialize;
-use std::fmt::Write;
 use std::str::FromStr;
-use std::vec;
 
 use crate::state::AppState;
 use proof_generator::{
-    controller::mev_blocker::call_mev_blocker_api,
+    controller::eth_blocks::call_eth_blocks_api,
     model::{
-        account_proof::AccountProof, eth_rpc::Input, proof::Proof, storage_proof::StorageProof,
+        account_proof::AccountProof, eth_rpc::BlockNumber, hex::HexString, proof::Proof,
+        storage_proof::StorageProof,
     },
 };
 
+use ethers::{
+    middleware::Middleware,
+    providers::{Http, Provider},
+    types::{BlockId, H160, H256, U256},
+};
 use starknet::{
-    core::types::FieldElement,
+    core::types::Felt,
     signers::{LocalWallet, SigningKey},
 };
 use starknet_handler::{
     fact_registry::fact_registry::FactRegistry, l1_headers_store::l1_headers_store::L1HeadersStore,
 };
+// use proof_generator::model::proof::{Proof, StorageProof};
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StorageRequest {
     pub block_number: u64,
-    pub account_proof: AccountProof,
+    pub account_address: String,
     pub slot: String,
-    //
-    pub trie_proof: serde_json::Value,
     pub storage_keys: Vec<String>,
 }
 
-pub async fn get_storage_value(
-    State(app_state): State<AppState>,
-    Json(input): Json<StorageRequest>,
-) -> impl IntoResponse {
-    dotenv().ok();
+async fn fetch_env_variable(key: &str) -> String {
+    dotenv::var(key).unwrap()
+}
 
-    let private_key = dotenv::var("KATANA_8_PRIVATE_KEY").unwrap();
-    let owner_account = dotenv::var("KATANA_8_ADDRESS").unwrap();
-    let owner_account = FieldElement::from_str(owner_account.as_str()).unwrap();
-    let signer = LocalWallet::from(SigningKey::from_secret_scalar(
-        FieldElement::from_hex_be(&private_key).unwrap(),
-    ));
+async fn init_signer() -> LocalWallet {
+    let private_key = fetch_env_variable("KATANA_8_PRIVATE_KEY").await;
+    let private_key_felt = Felt::from_hex(&private_key).unwrap();
+    let signing_key = SigningKey::from_secret_scalar(private_key_felt);
+    LocalWallet::from(signing_key)
+}
+
+async fn init_contracts(
+    signer: LocalWallet,
+    owner_account: Felt,
+) -> (FactRegistry, L1HeadersStore) {
     let fact_registry_address =
-        FieldElement::from_hex_be(dotenv::var("FACT_REGISTRY_ADDRESS").unwrap().as_str()).unwrap();
+        Felt::from_hex(&fetch_env_variable("FACT_REGISTRY_ADDRESS").await).unwrap();
     let l1_headers_store_address =
-        FieldElement::from_hex_be(dotenv::var("L1_HEADERS_STORE_ADDRESS").unwrap().as_str())
-            .unwrap();
+        Felt::from_hex(&fetch_env_variable("L1_HEADERS_STORE_ADDRESS").await).unwrap();
+    let starknet_rpc = fetch_env_variable("STARKNET_RPC").await;
 
     let fact_registry_contract = FactRegistry::new(
-        "http://localhost:5050",
+        &starknet_rpc,
         fact_registry_address,
         signer.clone(),
         owner_account,
     );
     let l1_headers_store_contract = L1HeadersStore::new(
-        "http://localhost:5051",
+        &starknet_rpc,
         l1_headers_store_address,
         signer,
         owner_account,
     );
 
-    // 1. request storage
+    (fact_registry_contract, l1_headers_store_contract)
+}
+
+async fn handle_storage_request(
+    fact_registry_contract: &FactRegistry,
+    input: &StorageRequest,
+) -> Result<U256, StatusCode> {
     tracing::info!("Request storage");
     let response_storage = fact_registry_contract
         .get_storage(
-            input.block_number, //
-            input.account_proof.clone(),
+            input.block_number,
+            U256::from_str(&input.account_address).unwrap(),
             input.slot.clone(),
         )
         .await;
 
-    let response_storage = match response_storage {
+    match response_storage {
         Ok(res) => {
-            tracing::info!("Result response_storage: {:?}", res.len());
-            res
+            tracing::info!("Result response_storage: {:?}", res);
+            if res.len() == 2 {
+                let mut value = U256::from(0);
+                for (i, field_element) in res.iter().enumerate() {
+                    let big_int = U256::from_dec_str(&field_element.to_string()).unwrap();
+                    value += big_int << (i * 128);
+                }
+                if value != U256::from(1) {
+                    return Ok(value);
+                }
+            }
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
         Err(err) => {
             tracing::error!("Error response_storage: {:?}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json("Error, respond_storage"),
-            )
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn handle_state_root_request(
+    l1_headers_store_contract: &L1HeadersStore,
+    input: &StorageRequest,
+    app_state: &AppState,
+) -> Result<(), StatusCode> {
+    tracing::info!("Request state_root by calling `get_state_root` in l1_headers_store");
+
+    match l1_headers_store_contract
+        .get_state_root(input.block_number)
+        .await
+    {
+        Ok(res) => {
+            let mut value = U256::from(0);
+            for (i, field_element) in res.iter().enumerate() {
+                let big_int = U256::from_dec_str(&field_element.to_string()).unwrap();
+                value += big_int << (i * 128);
+            }
+            tracing::info!("Result state_root: {:?}", value);
+
+            if value == U256::from(0) {
+                let api_input = BlockNumber {
+                    block_number: HexString::new(&format!("0x{:x}", input.block_number)),
+                };
+                let response =
+                    call_eth_blocks_api(State(app_state.client.clone()), Json(api_input))
+                        .await
+                        .into_response();
+
+                if response.status() == StatusCode::BAD_REQUEST {
+                    tracing::error!("Bad request error: {:?}", response);
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .map_err(|err| {
+                        tracing::error!("Error converting response body to bytes: {:?}", err);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+
+                if bytes.len() < 68 {
+                    tracing::error!(
+                        "Response body too short, expected at least 68 bytes, got {}",
+                        bytes.len()
+                    );
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+
+                let state_root = String::from_utf8(bytes[1..67].to_vec()).map_err(|err| {
+                    tracing::error!("Error converting bytes to string: {:?}", err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+                l1_headers_store_contract
+                    .store_state_root(input.block_number, state_root)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            tracing::info!("No state_root available, {}", err);
+            let api_input = BlockNumber {
+                block_number: HexString::new(&format!("0x{:x}", input.block_number)),
+            };
+            let response = call_eth_blocks_api(State(app_state.client.clone()), Json(api_input))
+                .await
                 .into_response();
+
+            if response.status() == StatusCode::BAD_REQUEST {
+                tracing::error!("Bad request error: {:?}", response);
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .map_err(|err| {
+                    tracing::error!("Error converting response body to bytes: {:?}", err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            let state_root =
+                String::from_utf8(bytes.to_vec()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let state_root = state_root.trim_matches('"').to_string();
+
+            l1_headers_store_contract
+                .store_state_root(input.block_number, state_root)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(())
+        }
+    }
+}
+
+async fn handle_proof_request(
+    input: &StorageRequest,
+    app_state: &AppState,
+) -> Result<Proof, StatusCode> {
+    tracing::info!("Handle proof: Request eth_getProof");
+    tracing::info!("Input: {:?}", input);
+
+    let provider = match Provider::<Http>::try_from(app_state.eth_rpc_url.as_str()) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to create provider: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
     };
 
-    // If the storage is already available
-    if !response_storage.is_empty() {
-        let mut result_string = String::new();
-        for field_element in &response_storage {
-            let bytes = field_element.to_bytes_be();
-            for byte in bytes {
-                write!(&mut result_string, "{:02x}", byte).unwrap();
+    let address = match H160::from_str(&input.account_address) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("Failed to parse account address: {:?}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    let storage_keys: Vec<H256> = input
+        .storage_keys
+        .iter()
+        .map(|key| {
+            let padded_key = format!("{:0>64}", key.trim_start_matches("0x"));
+            H256::from_str(&padded_key).map_err(|e| {
+                tracing::error!("Failed to parse storage key {}: {:?}", key, e);
+                StatusCode::BAD_REQUEST
+            })
+        })
+        .collect::<Result<Vec<H256>, StatusCode>>()?;
+
+    let block_number = BlockId::Number(input.block_number.into());
+
+    tracing::info!("Requesting proof for address: {:?}", address);
+    tracing::info!("Requesting proof for storage_keys: {:?}", storage_keys);
+
+    match provider
+        .get_proof(address, storage_keys, Some(block_number))
+        .await
+    {
+        Ok(proof) => {
+            let storage_proof = proof
+                .storage_proof
+                .into_iter()
+                .map(|sp| StorageProof {
+                    key: format!("{:?}", sp.key),
+                    value: sp.value.to_string(),
+                    proof: sp.proof.iter().map(|p| format!("{:?}", p)).collect(),
+                })
+                .collect();
+
+            let converted_proof = Proof {
+                address: format!("{:?}", proof.address),
+                balance: proof.balance.to_string(),
+                code_hash: format!("{:?}", proof.code_hash),
+                nonce: proof.nonce.to_string(),
+                storage_hash: format!("{:?}", proof.storage_hash),
+                account_proof: proof
+                    .account_proof
+                    .iter()
+                    .map(|p| format!("{:?}", p))
+                    .collect(),
+                storage_proof,
+                len_proof: proof.account_proof.len(),
+                state_root: format!("{:?}", proof.storage_hash), // Using storage_hash as state_root
+            };
+            tracing::info!("Proof: {:?}", converted_proof);
+            Ok(converted_proof)
+        }
+        Err(err) => {
+            tracing::error!("Error getting proof: {:?}", err);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn verify_account_proof(
+    fact_registry_contract: &FactRegistry,
+    input: &StorageRequest,
+    eth_proof: &Proof,
+) -> Result<(), StatusCode> {
+    tracing::info!("Entering verify_account_proof");
+
+    // Print raw input address for debugging
+    tracing::debug!("Raw account address input: {:?}", input.account_address);
+
+    let account_address = match Felt::from_str(&input.account_address) {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("Failed to parse account address: {:?}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    tracing::info!("Parsed account address: {:?}", account_address);
+
+    match fact_registry_contract
+        .get_verified_account_hash(input.block_number, account_address)
+        .await
+    {
+        Ok(hash) => {
+            if hash == vec![Felt::from(0), Felt::from(0)] {
+                tracing::info!("Account not verified yet");
+            } else {
+                tracing::info!("Account already verified with hash: {:?}", hash);
+                return Ok(());
             }
         }
-        return (StatusCode::OK, Json(&result_string)).into_response();
-    } else {
-        // 2. request storage proof by calling `call_mev_blocker_api` in proof-generator
-        tracing::info!("Request storage proof");
-        let storage_proof = {
-            let api_input = Input {
-                account_address: input.account_proof.address.to_string(),
-                storage_keys: input.storage_keys.clone(),
-            };
-
-            // I think the name `call_mev_blocker_api` should be changed
-            let response = call_mev_blocker_api(State(app_state.client.clone()), Json(api_input))
-                .await
-                .into_response();
-
-            let bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    tracing::error!("Error converting response body to bytes: {:?}", err);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json("Error converting response body to bytes"),
-                    )
-                        .into_response();
-                }
-            };
-
-            let storage_proof: StorageProof = match serde_json::from_slice(&bytes) {
-                Ok(proof) => proof,
-                Err(err) => {
-                    tracing::error!("Error deserializing response to StorageProof: {:?}", err);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json("Error deserializing response to StorageProof"),
-                    )
-                        .into_response();
-                }
-            };
-
-            storage_proof
-        };
-
-        // 3. request state_root by calling `get_state_root` in l1_headers_store
-        tracing::info!("Request state_root by calling `get_state_root` in l1_headers_store");
-        let _state_root = {
-            match l1_headers_store_contract
-                .get_state_root(input.block_number)
-                .await
-            {
-                Ok(res) => {
-                    tracing::info!("Result state_root: {:?}", res.len());
-                    res
-                }
-                Err(err) => {
-                    tracing::error!("Error state_root: {:?}", err);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json("Error, get_state_root"),
-                    )
-                        .into_response();
-                }
-            };
-        };
-
-        // 3-ALT.
-        //        request the RLP Encoded Block from the proof_generator
-        //        then process the block with the starknet_handler, which will save the state_root
-        {
-
-            // let rlp_encoded_block = proof_generator.get_rlp_encoded_block();
-            // starknet_handler::interface::process_block(rlp_encoded_block);
+        Err(e) => {
+            tracing::info!("error: {:?}", e);
         }
+    }
 
-        // 4. request storage proof again
-        tracing::info!("Request storage proof");
-        let storage_proof = {
-            let api_input = Input {
-                account_address: input.account_proof.address.to_string(),
-                storage_keys: input.storage_keys.clone(),
-            };
+    tracing::info!("Preparing to verify account on Starknet");
 
-            // I think the name `call_mev_blocker_api` should be changed
-            let response = call_mev_blocker_api(State(app_state.client.clone()), Json(api_input))
-                .await
-                .into_response();
+    let account_proof = AccountProof {
+        address: eth_proof.address.clone(),
+        balance: eth_proof.balance.clone(),
+        code_hash: eth_proof.code_hash.clone(),
+        storage_hash: eth_proof.storage_hash.clone(),
+        nonce: u64::from_str(&eth_proof.nonce.clone()).unwrap(),
+        bytes: vec![], // You might need to fill this if required
+        data: eth_proof.account_proof.clone(),
+    };
 
-            let bytes = match axum::body::to_bytes(response.into_body(), usize::MAX).await {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    tracing::error!("Error converting response body to bytes: {:?}", err);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json("Error converting response body to bytes"),
-                    )
-                        .into_response();
-                }
-            };
+    tracing::info!("Created AccountProof: {:?}", account_proof);
+    tracing::info!("Calling prove_account");
 
-            let storage_proof: StorageProof = match serde_json::from_slice(&bytes) {
-                Ok(proof) => proof,
-                Err(err) => {
-                    tracing::error!("Error deserializing response to StorageProof: {:?}", err);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json("Error deserializing response to StorageProof"),
-                    )
-                        .into_response();
-                }
-            };
-            storage_proof
-        };
-
-        // 5. check if Account Already verified
-        {
-            tracing::info!("Check if account already verified");
-            // let is_verified_account =
-            //     starknet_handler_interface.check_account_proof_status(input.account_proof);
-            // if is_verified_account == false {
-            //     if starknet_handler_interface.verify_account_proof(input.account_proof) == false {
-            //         tracing::error!("Error while verifying the account proof: {:?}", err);
-            //         return (
-            //             StatusCode::INTERNAL_SERVER_ERROR,
-            //             Json("Error while verifying the account proof"),
-            //         )
-            //             .into_response();
-            //     } else {
-            //         //
-            //     }
-            // };
+    // Ensure the call to prove_account is logged
+    match fact_registry_contract
+        .prove_account(input.block_number, account_proof)
+        .await
+    {
+        Ok(res) => {
+            tracing::info!("Prove account response: {:?}", res);
+            Ok(())
         }
-
-        // 6. verify storage proof
-        {
-            tracing::info!("Verifying the storage proof");
-            // let is_verified_storage =
-            //     starknet_handler_interface.verify_storage_proof(storage_proof);
-
-            // if is_verified_storage == false {
-            //     tracing::error!("Error while verifying the storage proof: {:?}", err);
-            //     return (
-            //         StatusCode::INTERNAL_SERVER_ERROR,
-            //         Json("Error while verifying the storage proof"),
-            //     );
-            // }
+        Err(err) => {
+            tracing::error!("Error while verifying the account proof: {:?}", err);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
+    }
+}
 
-        return (StatusCode::OK, Json("done")).into_response();
+async fn verify_storage_proof(
+    fact_registry_contract: &FactRegistry,
+    input: &StorageRequest,
+    eth_proof: Proof,
+) -> Result<axum::http::Response<axum::body::Body>, StatusCode> {
+    tracing::info!("Verifying the storage proof");
+
+    // Check if there's at least one storage proof
+    if eth_proof.storage_proof.is_empty() {
+        tracing::error!("No storage proof found");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Take the first storage proof
+    let storage_proof = eth_proof.storage_proof.into_iter().next().unwrap();
+
+    fact_registry_contract
+        .prove_storage(
+            input.block_number,
+            U256::from_str(&input.account_address).unwrap(),
+            storage_proof,
+            input.slot.clone(),
+        )
+        .await
+        .map(|res| (StatusCode::OK, Json(&res)).into_response())
+        .map_err(|err| {
+            tracing::error!("Error while verifying the storage proof: {:?}", err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+pub async fn get_storage_value(
+    State(app_state): State<AppState>,
+    Json(input): Json<StorageRequest>,
+) -> axum::http::Response<axum::body::Body> {
+    dotenv().ok();
+
+    let signer = init_signer().await;
+    let owner_account = Felt::from_hex(&fetch_env_variable("KATANA_8_ADDRESS").await).unwrap();
+    let (fact_registry_contract, l1_headers_store_contract) =
+        init_contracts(signer, owner_account).await;
+
+    if let Ok(value) = handle_storage_request(&fact_registry_contract, &input).await {
+        return (StatusCode::OK, Json(&value)).into_response();
+    }
+
+    if let Err(status_code) =
+        handle_state_root_request(&l1_headers_store_contract, &input, &app_state).await
+    {
+        return (status_code, Json("Error requesting state root")).into_response();
+    }
+
+    let eth_proof = match handle_proof_request(&input, &app_state).await {
+        Ok(proof) => proof,
+        Err(status_code) => {
+            return (status_code, Json("Error requesting eth_getProof")).into_response()
+        }
+    };
+
+    if let Err(status_code) =
+        verify_account_proof(&fact_registry_contract, &input, &eth_proof).await
+    {
+        return (status_code, Json("Error verifying account proof")).into_response();
+    }
+
+    match verify_storage_proof(&fact_registry_contract, &input, eth_proof).await {
+        Ok(response) => response,
+        Err(status_code) => (status_code, Json("Error verifying storage proof")).into_response(),
     }
 }
