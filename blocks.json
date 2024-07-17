@@ -1,0 +1,18 @@
+{
+    "number": 13843670,
+    "baseFeePerGas": 91243804547,
+    "difficulty": 11985448668385179,
+    "gasLimit": 30029267,
+    "gasUsed": 13684878,
+    "hash": "0x62a8a05ef6fcd39a11b2d642d4b7ab177056e1eb4bde4454f67285164ef8ce65",
+    "miner": "0x829bd824b016326a401d083b33d092293333a830",
+    "mixHash": "0x90b1cd7d723dd0a7cd8690ea9e71c712c3c02592dce25bd1c06e61ccb5a281ec",
+    "nonce": "0x2cb34b0005f35ea9",
+    "parentHash": "0x961056e860e9f4b93deb4aeba4893882f4a82cd1231a79a932c6939e918c0df9",
+    "receiptsRoot": "0xbd470fa25c3b2c1c746a8f220a0c351882eb64b358357a7fde8dd77f327f0240",
+    "sha3Uncles": "0xd55d1869a3b2254149846348a99ecbc84166c4480e27086369ae3b3699e4c500",
+    "size": 48590,
+    "stateRoot": "0x2045bf4ea5561e88a4d0d9afbc316354e49fe892ac7e961a5e68f1f4b9561152",
+    "timestamp": 1640024567,
+    "totalDifficulty": 37022737289236323161452
+}
